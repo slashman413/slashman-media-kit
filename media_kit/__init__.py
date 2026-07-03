@@ -9,6 +9,7 @@ from .youtube import (  # noqa: F401
     get_authenticated_service,
     upload_video,
     upload_video_from_env,
+    YouTubeUploader,
 )
 
 __version__ = "0.1.0"
