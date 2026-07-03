@@ -13,6 +13,7 @@ Handles OAuth 2.0 authentication and video upload to YouTube.
 
 import os
 import json
+import pickle  # noqa: F401  (parity with kling's original module)
 import logging
 import random
 import http.client  # noqa: F401  (kept for parity with original module)
@@ -235,3 +236,109 @@ def upload_video_from_env(
     )
 
     return video_id
+
+
+class YouTubeUploader:
+    """Upload videos to YouTube via a refresh-token flow (ported verbatim from
+    kling-shorts-bot). Credential env names accept YOUTUBE_* or GOOGLE_*."""
+
+    def __init__(self):
+        self.client_id, self.client_secret = resolve_oauth_env()
+        self.refresh_token = (
+            os.environ.get("YOUTUBE_REFRESH_TOKEN")
+            or os.environ.get("GOOGLE_REFRESH_TOKEN")
+        )
+        self.token_file = self._get_token_path()
+
+        if not all([self.client_id, self.client_secret, self.refresh_token]):
+            raise ValueError(
+                "YouTube OAuth not configured.\n"
+                "Required env vars (YOUTUBE_* or GOOGLE_*):\n"
+                "  YOUTUBE_CLIENT_ID\n"
+                "  YOUTUBE_CLIENT_SECRET\n"
+                "  YOUTUBE_REFRESH_TOKEN\n"
+            )
+
+        self.service = self._authenticate()
+
+    def _get_token_path(self) -> Path:
+        return Path(os.environ.get("YOUTUBE_TOKEN_PATH", "./youtube_token.pickle"))
+
+    def _authenticate(self):
+        """Authenticate with YouTube using OAuth 2.0 refresh token."""
+        creds = Credentials(
+            None,
+            refresh_token=self.refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            scopes=SCOPES,
+        )
+        creds.refresh(Request())
+        return build("youtube", "v3", credentials=creds)
+
+    def upload_video(
+        self,
+        video_path: str,
+        title: str,
+        description: str,
+        tags: list,
+        category_id: str = "24",  # 24 = Entertainment (Shorts-friendly)
+        privacy_status: str = "public",
+    ) -> Optional[str]:
+        """Upload a video to YouTube Shorts. Returns the video ID."""
+        body = {
+            "snippet": {
+                "title": title[:100],
+                "description": description,
+                "tags": tags,
+                "categoryId": category_id,
+                "defaultLanguage": "zh-TW",
+            },
+            "status": {
+                "privacyStatus": privacy_status,
+                "selfDeclaredMadeForKids": False,
+            },
+        }
+
+        media = MediaFileUpload(
+            video_path,
+            chunksize=1024 * 1024,
+            resumable=True,
+        )
+
+        request = self.service.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=media,
+        )
+
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print(f"[YouTube] Upload progress: {int(status.progress() * 100)}%")
+
+        video_id = response.get("id")
+        print(f"[YouTube] Uploaded! Video ID: {video_id}")
+        print(f"[YouTube] URL: https://youtube.com/watch?v={video_id}")
+        return video_id
+
+    def upload_shorts_batch(
+        self, videos: list, shorts_prefix: str = "#Shorts"
+    ) -> list:
+        """Upload multiple videos as Shorts. Returns a list of video IDs."""
+        video_ids = []
+        for i, video in enumerate(videos):
+            print(f"\n[YouTube] Uploading video {i+1}/{len(videos)}: {video['title']}")
+
+            vid = self.upload_video(
+                video_path=video["path"],
+                title=f"{shorts_prefix} {video['title']}",
+                description=video.get("description", ""),
+                tags=video.get("tags", []),
+            )
+            if vid:
+                video_ids.append(vid)
+
+        return video_ids
